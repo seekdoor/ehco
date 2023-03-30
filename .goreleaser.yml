@@ -21,8 +21,6 @@ builds:
       - 7
     goos:
       - linux
-      - darwin
-      - windows
     hooks:
       post: ls dist/ && upx dist/*
 archives:

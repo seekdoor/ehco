@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/Ehco1996/ehco/internal/config"
-	"github.com/Ehco1996/ehco/internal/logger"
 	"github.com/go-ping/ping"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -44,10 +43,10 @@ type PingGroup struct {
 func initPinger(host string) *ping.Pinger {
 	pinger := ping.New(host)
 	if err := pinger.Resolve(); err != nil {
-		logger.Errorf("[ping] failed to resolve pinger: %s\n", err.Error())
+		l.Errorf("failed to resolve pinger host:%s err:%s\n", host, err.Error())
 		return nil
 	}
-	logger.Infof("[ping] Resolved %s as %s", host, pinger.IPAddr())
+	l.Infof("Resolved %s as %s", host, pinger.IPAddr())
 	pinger.Interval = pingInterval
 	pinger.Timeout = time.Duration(math.MaxInt64)
 	pinger.RecordRtts = false
@@ -61,7 +60,7 @@ func NewPingGroup(cfg *config.Config) *PingGroup {
 	seen := make(map[string]*ping.Pinger)
 	labelMap := make(map[string]string)
 
-	for _, relayCfg := range cfg.Configs {
+	for _, relayCfg := range cfg.RelayConfigs {
 		// NOTE (https/ws/wss)://xxx.com -> xxx.com
 		for _, host := range relayCfg.TCPRemotes {
 			if strings.Contains(host, "//") {
@@ -85,11 +84,11 @@ func NewPingGroup(cfg *config.Config) *PingGroup {
 		pinger.OnRecv = func(pkt *ping.Packet) {
 			PingResponseDurationSeconds.WithLabelValues(
 				pkt.IPAddr.String(), pkt.Addr, labelMap[pkt.Addr]).Observe(pkt.Rtt.Seconds())
-			logger.Infof("[ping] %d bytes from %s: icmp_seq=%d time=%v ttl=%v",
+			l.Infof("%d bytes from %s: icmp_seq=%d time=%v ttl=%v",
 				pkt.Nbytes, pkt.Addr, pkt.Seq, pkt.Rtt, pkt.Ttl)
 		}
 		pinger.OnDuplicateRecv = func(pkt *ping.Packet) {
-			logger.Infof("[ping] %d bytes from %s: icmp_seq=%d time=%v ttl=%v (DUP!)",
+			l.Infof("%d bytes from %s: icmp_seq=%d time=%v ttl=%v (DUP!)",
 				pkt.Nbytes, pkt.IPAddr, pkt.Seq, pkt.Rtt, pkt.Ttl)
 		}
 		pingers[i] = pinger
@@ -120,15 +119,18 @@ func (pg *PingGroup) Collect(ch chan<- prometheus.Metric) {
 }
 
 func (pg *PingGroup) Run() {
+	if len(pg.Pingers) <= 0 {
+		return
+	}
 	splay := time.Duration(pingInterval.Nanoseconds() / int64(len(pg.Pingers)))
-	logger.Infof("[ping] Waiting %s between starting pingers", splay)
+	l.Infof("Waiting %s between starting pingers", splay)
 	for idx := range pg.Pingers {
 		go func() {
 			pinger := pg.Pingers[idx]
 			if err := pinger.Run(); err != nil {
-				logger.Infof("[ping] Starting prober err: %s", err)
+				l.Infof("Starting prober err: %s", err)
 			}
-			logger.Infof("[ping] Starting prober for %s", pinger.Addr())
+			l.Infof("Starting prober for %s", pinger.Addr())
 		}()
 		time.Sleep(splay)
 	}

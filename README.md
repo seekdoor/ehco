@@ -6,21 +6,17 @@
 
 ehco is a network relay tool and a typo :)
 
+[see Readme in English here](README_EN.md)
+
 ## 视频安装教程
 
 本隧道和 [django-sspanel](https://github.com/Ehco1996/django-sspanel)深度对接，可以很方便的管理中转节点
 
 * 面板视频安装教程: [地址](https://youtu.be/BRHcdGeufvY)
 
-* 后端对接视频教程: [地址](https://youtu.be/QNbnya1HHU0)
-
-* 隧道对接视频教程: [地址](https://youtu.be/R4U0NZaMUeY)
+* 隧道后端对接视频教程: [地址](https://youtu.be/R4U0NZaMUeY)
 
 ## 安装
-
-### brew
-
- `brew install ehco`
 
 ### go get
 
@@ -45,6 +41,7 @@ go get -u "github.com/Ehco1996/ehco/cmd/ehco"
 * benchmark
 * grafana 监控报警
 * 热重载配置
+* 内嵌了完整版本的 [xray](https://github.com/XTLS/Xray-core) 后端
 
 ## 使用说明
 
@@ -77,7 +74,7 @@ go get -u "github.com/Ehco1996/ehco/cmd/ehco"
 
 > ehco支持从 `配置文件` / `http接口` 里读取 `json` 格式的配置并启动
 
-配置文件格式要求如下(更多例子可以参考项目里的 `config.json` 文件):
+配置文件格式要求如下(更多例子可以参考项目里的 [config.json](examples/config.json) 文件):
 
 ```json
 {
@@ -113,7 +110,7 @@ kill -HUP pid
 
 # 重载成功可以看到如下信息
 [cfg-reload] Got A HUP Signal! Now Reloading Conf ...
-[cfg] Load Config From file:config.json
+Load Config From file:config.json
 [cfg-reload] starr new relay name=[At=127.0.0.1:12342 Over=raw TCP-To=[0.0.0.0:5201] UDP-To=[0.0.0.0:5201] Through=raw]
 [relay] Close relay [At=127.0.0.1:1234 Over=raw TCP-To=[0.0.0.0:5201] UDP-To=[0.0.0.0:5201] Through=raw]
 [relay] Start UDP relay [At=127.0.0.1:12342 Over=raw TCP-To=[0.0.0.0:5201] UDP-To=[0.0.0.0:5201] Through=raw]
@@ -147,7 +144,7 @@ go run cmd/ehco/main.go -l 0.0.0.0:1234 -r 0.0.0.0:5201
 # 直接转发END
 
 # 通过ws隧道转发
-# listen 1234 relay over ws to 1236
+# listen 1235 relay over ws to 1236
 go run cmd/ehco/main.go -l 0.0.0.0:1235  -r ws://0.0.0.0:1236 -tt ws
 
 # listen 1236 through ws relay to 5201
@@ -184,7 +181,7 @@ iperf3 -c 0.0.0.0 -p 1234 -u -b 1G --length 1024
 
 ```
 
-| iperf | raw | relay(raw) | relay(ws) |relay(wss) | relay(mwss)|
-| ---- | ----  | ---- | ---- | ---- | ---- |
-| tcp  | 123 Gbits/sec | 55 Gbits/sec | 41 Gbits/sec | 10 Gbits/sec | 5.78 Gbits/sec |
-| udp  | 14.5 Gbits/sec | 3.3 Gbits/sec | 直接转发 | 直接转发 | 直接转发 |
+| iperf | raw | relay(raw) | relay(ws) |relay(wss) | relay(mwss) | relay(mtcp) |
+| ---- | ----  | ---- | ---- | ---- | ---- | ---- |
+| tcp  | 123 Gbits/sec | 55 Gbits/sec | 41 Gbits/sec | 10 Gbits/sec | 5.78 Gbits/sec | 22.2 Gbits/sec |
+| udp  | 14.5 Gbits/sec | 3.3 Gbits/sec | 直接转发 | 直接转发 | 直接转发 | 直接转发 |

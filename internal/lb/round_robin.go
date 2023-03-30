@@ -1,21 +1,12 @@
 package lb
 
 import (
-	"github.com/Ehco1996/ehco/internal/logger"
 	"go.uber.org/atomic"
 )
 
 type Node struct {
 	Address string
 	Label   string
-
-	BlockTimes *atomic.Int64
-}
-
-func (n *Node) BlockForSomeTime() {
-	// TODO: make this configurable
-	n.BlockTimes.Add(1000)
-	logger.Infof("[lb] block remote node for 1000 times lable=%s remote=%s", n.Label, n.Address)
 }
 
 // RoundRobin is an interface for representing round-robin balancing.
@@ -39,9 +30,5 @@ func NewRoundRobin(nodeList []*Node) RoundRobin {
 func (r *roundrobin) Next() *Node {
 	n := r.next.Add(1)
 	next := r.nodeList[(int(n)-1)%r.len]
-	if next.BlockTimes.Load() > 0 {
-		next.BlockTimes.Dec()
-		return r.Next()
-	}
 	return next
 }

@@ -8,15 +8,26 @@ import (
 
 	"github.com/Ehco1996/ehco/internal/config"
 	"github.com/Ehco1996/ehco/internal/constant"
-	"github.com/Ehco1996/ehco/internal/logger"
+	"github.com/Ehco1996/ehco/pkg/log"
 	"github.com/gorilla/mux"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/prometheus/common/promlog"
+	"github.com/prometheus/common/version"
+	"github.com/prometheus/node_exporter/collector"
+	"go.uber.org/zap"
+	"gopkg.in/alecthomas/kingpin.v2"
 )
 
-func Index(w http.ResponseWriter, r *http.Request) {
-	logger.Infof("index call from %s", r.RemoteAddr)
-	fmt.Fprintf(w, "access from %s \n", r.RemoteAddr)
+var (
+	l *zap.SugaredLogger
+)
+
+func MakeIndexF(logger *zap.SugaredLogger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		logger.Infof("index call from %s", r.RemoteAddr)
+		fmt.Fprintf(w, "access from %s \n", r.RemoteAddr)
+	}
 }
 
 func Welcome(w http.ResponseWriter, r *http.Request) {
@@ -41,6 +52,7 @@ func registerMetrics(cfg *config.Config) {
 	prometheus.MustRegister(EhcoAlive)
 	prometheus.MustRegister(CurConnectionCount)
 	prometheus.MustRegister(NetWorkTransmitBytes)
+	prometheus.MustRegister(HandShakeDuration)
 
 	EhcoAlive.Set(EhcoAliveStateInit)
 
@@ -53,11 +65,36 @@ func registerMetrics(cfg *config.Config) {
 	}
 }
 
+func registerNodeExporterMetrics(cfg *config.Config) error {
+	level := &promlog.AllowedLevel{}
+	// NOTE hard code node exporter to error to mute this logger
+	if err := level.Set("error"); err != nil {
+		return err
+	}
+	promlogConfig := &promlog.Config{Level: level}
+	logger := promlog.New(promlogConfig)
+
+	// see this https://github.com/prometheus/node_exporter/pull/2463
+	if _, err := kingpin.CommandLine.Parse([]string{}); err != nil {
+		return err
+	}
+	nc, err := collector.NewNodeCollector(logger)
+	if err != nil {
+		return fmt.Errorf("couldn't create collector: %s", err)
+	}
+	// nc.Collectors = collectors
+	prometheus.MustRegister(
+		nc,
+		version.NewCollector("node_exporter"),
+	)
+	return nil
+}
+
 func simpleTokenAuthMiddleware(token string, h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if t := r.URL.Query().Get("token"); t != token {
-			msg := fmt.Sprintf("[web] unauthored from %s", r.RemoteAddr)
-			logger.Logger.Error(msg)
+			msg := fmt.Sprintf("un auth request from %s", r.RemoteAddr)
+			l.Error(msg)
 			hj, ok := w.(http.Hijacker)
 			if ok {
 				conn, _, _ := hj.Hijack()
@@ -71,17 +108,26 @@ func simpleTokenAuthMiddleware(token string, h http.Handler) http.Handler {
 	})
 }
 
-func StartWebServer(cfg *config.Config) {
+func StartWebServer(cfg *config.Config) error {
+	// todo make this only doing once
+	l = log.Logger.Named("web")
+	// end todo
+
 	addr := fmt.Sprintf("0.0.0.0:%d", cfg.WebPort)
-	logger.Infof("[web] Start Web Server at http://%s/", addr)
+	l.Infof("Start Web Server at http://%s/", addr)
+
 	r := mux.NewRouter()
 	AttachProfiler(r)
 	registerMetrics(cfg)
+	if err := registerNodeExporterMetrics(cfg); err != nil {
+		return err
+	}
 	r.Handle("/", http.HandlerFunc(Welcome))
 	r.Handle("/metrics/", promhttp.Handler())
+
 	if cfg.WebToken != "" {
-		logger.Fatal(http.ListenAndServe(addr, simpleTokenAuthMiddleware(cfg.WebToken, r)))
+		return http.ListenAndServe(addr, simpleTokenAuthMiddleware(cfg.WebToken, r))
 	} else {
-		logger.Fatal(http.ListenAndServe(addr, r))
+		return http.ListenAndServe(addr, r)
 	}
 }

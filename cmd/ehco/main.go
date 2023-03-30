@@ -10,27 +10,37 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
+	"github.com/getsentry/sentry-go"
 	cli "github.com/urfave/cli/v2"
+	"go.uber.org/zap"
 
 	"github.com/Ehco1996/ehco/internal/config"
 	"github.com/Ehco1996/ehco/internal/constant"
-	"github.com/Ehco1996/ehco/internal/logger"
 	"github.com/Ehco1996/ehco/internal/relay"
 	"github.com/Ehco1996/ehco/internal/tls"
 	"github.com/Ehco1996/ehco/internal/web"
+	"github.com/Ehco1996/ehco/pkg/log"
+	"github.com/Ehco1996/ehco/pkg/xray"
 )
 
-var LocalAddr string
-var ListenType string
-var RemoteAddr string
-var UDPRemoteAddr string
-var TransportType string
-var ConfigPath string
-var WebPort int
-var WebToken string
-var EnablePing bool
-var SystemFilePath = "/etc/systemd/system/ehco.service"
+// flags
+var (
+	LocalAddr      string
+	ListenType     string
+	TCPRemoteAddr  string
+	UDPRemoteAddr  string
+	TransportType  string
+	ConfigPath     string
+	WebPort        int
+	WebToken       string
+	EnablePing     bool
+	SystemFilePath = "/etc/systemd/system/ehco.service"
+	LogLevel       string
+)
+
+var cmdLogger *zap.SugaredLogger
 
 const SystemDTMPL = `# Ehco service
 [Unit]
@@ -46,7 +56,7 @@ Restart=always
 WantedBy=multi-user.target
 `
 
-func main() {
+func createCliAPP() *cli.App {
 	cli.VersionPrinter = func(c *cli.Context) {
 		println("Welcome to ehco (ehco is a network relay tool and a typo)")
 		println(fmt.Sprintf("Version=%s", constant.Version))
@@ -61,49 +71,49 @@ func main() {
 	app.Usage = "ehco is a network relay tool and a typo :)"
 	app.Flags = []cli.Flag{
 		&cli.StringFlag{
-			Name:        "l, local",
-			Value:       "0.0.0.0:1234",
-			Usage:       "监听地址",
+			Name:        "l,local",
+			Usage:       "监听地址，例如 0.0.0.0:1234",
 			EnvVars:     []string{"EHCO_LOCAL_ADDR"},
 			Destination: &LocalAddr,
+			Required:    true,
 		},
 		&cli.StringFlag{
 			Name:        "lt,listen_type",
 			Value:       "raw",
-			Usage:       "监听类型",
+			Usage:       "监听类型，可选项有 raw,ws,wss,mwss",
 			EnvVars:     []string{"EHCO_LISTEN_TYPE"},
 			Destination: &ListenType,
 			Required:    false,
 		},
 		&cli.StringFlag{
 			Name:        "r,remote",
-			Value:       "0.0.0.0:9001",
-			Usage:       "转发地址",
+			Usage:       "TCP 转发地址，例如 0.0.0.0:5201，通过 ws 隧道转发时应为 ws://0.0.0.0:2443",
 			EnvVars:     []string{"EHCO_REMOTE_ADDR"},
-			Destination: &RemoteAddr,
+			Destination: &TCPRemoteAddr,
 		},
 		&cli.StringFlag{
 			Name:        "ur,udp_remote",
-			Usage:       "UDP转发地址",
+			Usage:       "UDP 转发地址，例如 0.0.0.0:1234",
 			EnvVars:     []string{"EHCO_UDP_REMOTE_ADDR"},
 			Destination: &UDPRemoteAddr,
 		},
 		&cli.StringFlag{
 			Name:        "tt,transport_type",
 			Value:       "raw",
-			Usage:       "传输类型",
+			Usage:       "传输类型，可选选有 raw,ws,wss,mwss",
 			EnvVars:     []string{"EHCO_TRANSPORT_TYPE"},
 			Destination: &TransportType,
 			Required:    false,
 		},
 		&cli.StringFlag{
 			Name:        "c,config",
-			Usage:       "配置文件地址",
+			Usage:       "配置文件地址，支持文件类型或 http api",
+			EnvVars:     []string{"EHCO_CONFIG_FILE"},
 			Destination: &ConfigPath,
 		},
 		&cli.IntFlag{
 			Name:        "web_port",
-			Usage:       "promtheus web expoter 的监听端口",
+			Usage:       "prometheus web exporter 的监听端口",
 			EnvVars:     []string{"EHCO_WEB_PORT"},
 			Value:       0,
 			Destination: &WebPort,
@@ -117,9 +127,16 @@ func main() {
 		},
 		&cli.StringFlag{
 			Name:        "web_token",
-			Usage:       "访问web的token,如果访问不带着正确的token，会直接reset连接",
+			Usage:       "如果访问webui时不带着正确的token，会直接reset连接",
 			EnvVars:     []string{"EHCO_WEB_TOKEN"},
 			Destination: &WebToken,
+		},
+		&cli.StringFlag{
+			Name:        "log_level",
+			Usage:       "log level",
+			EnvVars:     []string{"EHCO_LOG_LEVEL"},
+			Destination: &WebToken,
+			DefaultText: "info",
 		},
 	}
 
@@ -129,11 +146,10 @@ func main() {
 			Usage: "install ehco systemd service",
 			Action: func(c *cli.Context) error {
 				fmt.Printf("Install ehco systemd file to `%s`\n", SystemFilePath)
-
 				if _, err := os.Stat(SystemFilePath); err != nil && os.IsNotExist(err) {
 					f, _ := os.OpenFile(SystemFilePath, os.O_CREATE|os.O_WRONLY, 0644)
 					if _, err := f.WriteString(SystemDTMPL); err != nil {
-						logger.Fatal(err)
+						cmdLogger.Fatal(err)
 					}
 					f.Close()
 				}
@@ -145,171 +161,246 @@ func main() {
 			},
 		},
 	}
-
-	app.Action = start
-	err := app.Run(os.Args)
-	if err != nil {
-		logger.Fatal(err)
-	}
+	return app
 }
 
-func start(ctx *cli.Context) error {
-	cfg := loadConfig()
-	if cfg.WebPort > 0 {
-		go web.StartWebServer(cfg)
-	}
-	return startAndWatchRelayServers(cfg)
-}
-
-func startAndWatchRelayServers(cfg *config.Config) error {
-	// init main ctx
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// relay ListenAddress -> relay
-	var relayM sync.Map
-
-	// func used to start one relay
-	var startOneRelayFunc = func(r *relay.Relay) {
-		relayM.Store(r.Name, r)
-		if err := r.ListenAndServe(); err != nil && !errors.Is(err, net.ErrClosed) {
-			logger.Errorf("[relay] Name=%s ListenAndServe err=%s", r.Name, err)
-		}
-	}
-
-	var stopOneRelayFunc = func(r *relay.Relay) {
-		r.Close()
-		relayM.Delete(r.Name)
-	}
-
-	// init relay map
-	for idx := range cfg.Configs {
-		r, err := relay.NewRelay(&cfg.Configs[idx])
-		if err != nil {
-			return err
-		}
-		go startOneRelayFunc(r)
-	}
-	// wg to control sub goroutine
-	var wg sync.WaitGroup
-
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
-	wg.Add(1)
-	go func(ctx context.Context) {
-		defer wg.Done()
-		select {
-		case <-ctx.Done():
-			logger.Info("ctx cancelled relay server exit")
-		case <-sigs:
-			relayM.Range(func(key, value interface{}) bool {
-				r := value.(*relay.Relay)
-				r.Close()
-				return true
-			})
-			cancel()
-		}
-	}(ctx)
-
-	// start reload loop
-	reloadCH := make(chan os.Signal, 1)
-	signal.Notify(reloadCH, syscall.SIGHUP)
-	wg.Add(1)
-	go func(ctx context.Context) {
-		defer wg.Done()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-reloadCH:
-				logger.Info("[cfg-reload] Got A HUP Signal! Now Reloading Conf ...")
-				newCfg := loadConfig()
-
-				var newRelayAddrList []string
-				for idx := range newCfg.Configs {
-					r, err := relay.NewRelay(&newCfg.Configs[idx])
-					if err != nil {
-						logger.Fatalf("[cfg-reload] reload new relay failed err=%s", err.Error())
-					}
-					newRelayAddrList = append(newRelayAddrList, r.Name)
-
-					// reload old relay
-					if oldR, ok := relayM.Load(r.Name); ok {
-						oldR := oldR.(*relay.Relay)
-						if oldR.Name != r.Name {
-							logger.Infof("[cfg-reload] close old relay name=%s", oldR.Name)
-							stopOneRelayFunc(oldR)
-							go startOneRelayFunc(r)
-						}
-						continue // no need to reload
-					}
-					// start bread new relay that not in old relayM
-					logger.Infof("[cfg-reload] starr new relay name=%s", r.Name)
-					go startOneRelayFunc(r)
-				}
-				// closed relay not in new config
-				relayM.Range(func(key, value interface{}) bool {
-					oldAddr := key.(string)
-					if !InArray(oldAddr, newRelayAddrList) {
-						v, _ := relayM.Load(oldAddr)
-						oldR := v.(*relay.Relay)
-						stopOneRelayFunc(oldR)
-					}
-					return true
-				})
-			}
-		}
-	}(ctx)
-
-	//TODO refine this
-	web.EhcoAlive.Set(web.EhcoAliveStateRunning)
-	wg.Wait()
-	return nil
-}
-
-func loadConfig() (cfg *config.Config) {
+func loadConfig() (cfg *config.Config, err error) {
 	if ConfigPath != "" {
 		cfg = config.NewConfigByPath(ConfigPath)
 		if err := cfg.LoadConfig(); err != nil {
-			logger.Fatal(err)
+			return nil, err
 		}
 	} else {
+		// prepare config from cli args
 		cfg = &config.Config{
 			WebPort:    WebPort,
 			WebToken:   WebToken,
 			EnablePing: EnablePing,
 			PATH:       ConfigPath,
-			Configs: []config.RelayConfig{
+			LogLeveL:   LogLevel,
+			RelayConfigs: []config.RelayConfig{
 				{
 					Listen:        LocalAddr,
 					ListenType:    ListenType,
-					TCPRemotes:    []string{RemoteAddr},
 					TransportType: TransportType,
 				},
 			},
 		}
+		if TCPRemoteAddr != "" {
+			cfg.RelayConfigs[0].TCPRemotes = []string{TCPRemoteAddr}
+		}
 		if UDPRemoteAddr != "" {
-			cfg.Configs[0].UDPRemotes = []string{UDPRemoteAddr}
+			cfg.RelayConfigs[0].UDPRemotes = []string{UDPRemoteAddr}
+		}
+		if err := cfg.Validate(); err != nil {
+			return nil, err
 		}
 	}
 
 	// init tls
-	for _, cfg := range cfg.Configs {
+	for _, cfg := range cfg.RelayConfigs {
 		if cfg.ListenType == constant.Listen_WSS || cfg.ListenType == constant.Listen_MWSS ||
 			cfg.TransportType == constant.Transport_WSS || cfg.TransportType == constant.Transport_MWSS {
-			tls.InitTlsCfg()
+			if err := tls.InitTlsCfg(); err != nil {
+				return nil, err
+			}
 			break
 		}
 	}
-
-	return cfg
+	return cfg, nil
 }
 
-func InArray(ele string, array []string) bool {
+func inArray(ele string, array []string) bool {
 	for _, v := range array {
 		if v == ele {
 			return true
 		}
 	}
 	return false
+}
+
+func startOneRelay(r *relay.Relay, relayM *sync.Map, errCh chan error) {
+	relayM.Store(r.Name, r)
+	if err := r.ListenAndServe(); err != nil && !errors.Is(err, net.ErrClosed) { // mute use closed network error
+		errCh <- err
+	}
+}
+
+func stopOneRelay(r *relay.Relay, relayM *sync.Map) {
+	r.Close()
+	relayM.Delete(r.Name)
+}
+
+func startRelayServers(ctx context.Context, cfg *config.Config) error {
+	// relay ListenAddress -> relay
+	relayM := &sync.Map{}
+	errCH := make(chan error, 1)
+	// init and relay servers
+	for idx := range cfg.RelayConfigs {
+		r, err := relay.NewRelay(&cfg.RelayConfigs[idx])
+		if err != nil {
+			return err
+		}
+		go startOneRelay(r, relayM, errCH)
+	}
+	// start watch config file TODO support reload from http , refine the ConfigPath global var
+	if ConfigPath != "" {
+		go watchAndReloadConfig(ctx, relayM, errCH)
+	}
+
+	select {
+	case err := <-errCH:
+		return err
+	case <-ctx.Done():
+		cmdLogger.Info("start to stop relay servers")
+		relayM.Range(func(key, value interface{}) bool {
+			r := value.(*relay.Relay)
+			r.Close()
+			return true
+		})
+		return nil
+	}
+}
+
+func watchAndReloadConfig(ctx context.Context, relayM *sync.Map, errCh chan error) {
+	cmdLogger.Infof("Start to watch config file: %s ", ConfigPath)
+
+	reloadCH := make(chan os.Signal, 1)
+	signal.Notify(reloadCH, syscall.SIGHUP)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-reloadCH:
+			cmdLogger.Info("Got A HUP Signal! Now Reloading Conf")
+			newCfg, err := loadConfig()
+			if err != nil {
+				cmdLogger.Fatalf("Reloading Conf meet error: %s ", err)
+			}
+
+			var newRelayAddrList []string
+			for idx := range newCfg.RelayConfigs {
+				r, err := relay.NewRelay(&newCfg.RelayConfigs[idx])
+				if err != nil {
+					cmdLogger.Fatalf("reload new relay failed err=%s", err.Error())
+				}
+				newRelayAddrList = append(newRelayAddrList, r.Name)
+
+				// reload old relay
+				if oldR, ok := relayM.Load(r.Name); ok {
+					oldR := oldR.(*relay.Relay)
+					if oldR.Name != r.Name {
+						cmdLogger.Infof("close old relay name=%s", oldR.Name)
+						stopOneRelay(oldR, relayM)
+						go startOneRelay(r, relayM, errCh)
+					}
+					continue // no need to reload
+				}
+				// start bread new relay that not in old relayM
+				cmdLogger.Infof("starr new relay name=%s", r.Name)
+				go startOneRelay(r, relayM, errCh)
+			}
+			// closed relay not in new config
+			relayM.Range(func(key, value interface{}) bool {
+				oldAddr := key.(string)
+				if !inArray(oldAddr, newRelayAddrList) {
+					v, _ := relayM.Load(oldAddr)
+					oldR := v.(*relay.Relay)
+					stopOneRelay(oldR, relayM)
+				}
+				return true
+			})
+		}
+	}
+}
+
+func initSentry() error {
+	if dsn := os.Getenv("SENTRY_DSN"); dsn != "" {
+		cmdLogger.Infof("init sentry with dsn", dsn)
+		return sentry.Init(sentry.ClientOptions{Dsn: dsn})
+	}
+	return nil
+}
+
+func initLogger(cfg *config.Config) error {
+	if err := log.InitGlobalLogger(cfg.LogLeveL); err != nil {
+		return err
+	}
+	return nil
+}
+
+func start(ctx *cli.Context) error {
+	cmdLogger = log.MustNewInfoLogger("cmd")
+
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	if err := initLogger(cfg); err != nil {
+		return err
+	}
+
+	if err := initSentry(); err != nil {
+		return err
+	}
+
+	// init main ctx
+	mainCtx, cancel := context.WithCancel(ctx.Context)
+	defer cancel()
+
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+
+	if cfg.WebPort > 0 {
+		go func() {
+			cmdLogger.Fatalf("StartWebServer meet err=%s", web.StartWebServer(cfg))
+		}()
+	}
+
+	if cfg.XRayConfig != nil {
+		go func() {
+			s, err := xray.StartXrayServer(mainCtx, cfg)
+			if err != nil {
+				cmdLogger.Fatalf("StartXrayServer meet err=%s", err)
+			}
+			defer s.Close()
+
+			if cfg.SyncTrafficEndPoint != "" {
+				go func() {
+					cmdLogger.Fatalf("StartSyncTask meet err=%s", xray.StartSyncTask(mainCtx, cfg))
+				}()
+			}
+			<-ctx.Done()
+		}()
+	}
+
+	if len(cfg.RelayConfigs) > 0 {
+		go func() {
+			cmdLogger.Fatalf("StartRelayServers meet err=%v", startRelayServers(mainCtx, cfg))
+		}()
+	}
+
+	<-sigs
+	return nil
+}
+
+func main() {
+	defer func() {
+		err := recover()
+		if err != nil {
+			sentry.CurrentHub().Recover(err)
+			sentry.Flush(time.Second * 5)
+		}
+	}()
+
+	app := createCliAPP()
+	// register start command
+	app.Action = start
+	// main thread start
+	if err := app.Run(os.Args); err != nil {
+		sentry.CurrentHub().CaptureException(err)
+		sentry.Flush(time.Second * 5)
+		cmdLogger.Fatal("start ehco server failed,err=", err)
+	}
 }
